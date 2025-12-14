@@ -5,10 +5,23 @@
 vim.g.mapleader = ","
 -- Note: maplocalleader is set per-buffer, not globally
 
--- Suppress lspconfig deprecation warning
-vim.g.lspconfig_suppress_deprecation_warning = true
--- Alternative method to suppress the warning
-vim.env.LSPCONFIG_SUPPRESS_DEPRECATION_WARNING = "1"
+-- Vimwiki configuration (must be set BEFORE lazy.nvim loads the plugin)
+local vimwiki_paths = os.getenv("VIM_WIKI_PATHS")
+local wikis = {}
+
+if vimwiki_paths and vimwiki_paths ~= "" then
+  for path in string.gmatch(vimwiki_paths, "([^,]+)") do
+    table.insert(wikis, {
+      path = path:gsub("^~", os.getenv("HOME")),  -- expand ~
+      syntax = "markdown",
+      ext = ".md"
+    })
+  end
+else
+  table.insert(wikis, { path = os.getenv("HOME") .. "/vimwiki", syntax = "markdown", ext = ".md" })
+end
+
+vim.g.vimwiki_list = wikis
 
 -- Set up lazy.nvim plugin manager
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
@@ -431,24 +444,6 @@ vim.g.fzf_colors = {
 }
 
 vim.g.fzf_preview_window = {}
-
--- Vimwiki configuration
-function SetVimScriptConfig(index, path)
-    return {syntax = "markdown", ext = ".md", path = path}
-end
-
-local vim_wiki_default_config = {syntax = "markdown", ext = ".md"}
-local vim_wiki_config = {vim_wiki_default_config}
-
-if vim.env.VIM_WIKI_PATHS ~= "" then
-    vim_wiki_config = {}
-    local vim_wiki_paths = vim.split(vim.env.VIM_WIKI_PATHS, ",")
-    vim_wiki_config = vim.tbl_map(function(path)
-        return SetVimScriptConfig(0, path)
-    end, vim_wiki_paths)
-end
-
-vim.g.vimwiki_list = vim_wiki_config
 
 -- Disable copilot by default (as in your config)
 vim.g.copilot_enabled = false

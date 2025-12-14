@@ -493,10 +493,10 @@ return {
     end,
   },
 
-  -- LSP and completion (replaces ALE)
+  -- LSP and completion (replaces ALE) using vim.lsp.config (Neovim 0.11+)
   {
     "neovim/nvim-lspconfig",
-    version = "0.1.*", -- Use stable version to avoid deprecation warnings
+    version = false, -- use latest; config lives under vim.lsp.config in Neovim
     dependencies = {
       "williamboman/mason.nvim",
       "williamboman/mason-lspconfig.nvim",
@@ -509,51 +509,465 @@ return {
       "saadparwaiz1/cmp_luasnip",
     },
     config = function()
-      -- Suppress lspconfig deprecation warning
-      vim.g.lspconfig_suppress_deprecation_warning = true
-      
+      if vim.lsp.config == nil then
+        vim.notify("vim.lsp.config not available. Update Neovim to >= 0.11.x.", vim.log.levels.ERROR)
+        return
+      end
+
       -- Mason setup
       require("mason").setup()
-      require("mason-lspconfig").setup({
-        ensure_installed = { "rust_analyzer", "ts_ls", "gopls" }
-        -- Note: pyright is installed system-wide via npm
+      local mason_lspconfig = require("mason-lspconfig")
+      mason_lspconfig.setup({
+        ensure_installed = { "rust_analyzer", "pyright", "ts_ls", "gopls" },
       })
 
-      -- LSP setup
-      -- Note: The deprecation warning about lspconfig is expected and harmless.
-      -- The new vim.lsp.config API is not fully stable yet in Neovim 0.11.4
-      local lspconfig = require("lspconfig")
+      -- Capabilities for nvim-cmp
+      local capabilities = require("cmp_nvim_lsp").default_capabilities()
+
+      -- Common on_attach for buffer-local keymaps
+      local on_attach = function(client, bufnr)
+        local map = function(mode, lhs, rhs, desc)
+          vim.keymap.set(mode, lhs, rhs, { buffer = bufnr, desc = desc })
+        end
+        map("n", "gd", vim.lsp.buf.definition, "Go to definition")
+        map("n", "gr", vim.lsp.buf.references, "Go to references")
+        map("n", "K", vim.lsp.buf.hover, "Hover")
+        map("n", "<leader>rn", vim.lsp.buf.rename, "Rename symbol")
+        map("n", "<leader>ca", vim.lsp.buf.code_action, "Code action")
+        map("n", "[d", vim.diagnostic.goto_prev, "Prev diagnostic")
+        map("n", "]d", vim.diagnostic.goto_next, "Next diagnostic")
+        map("n", "<leader>as", ":copen<CR>", "Open quickfix")
+        map("n", "<leader>aa", ":cclose<CR>", "Close quickfix")
+
+        -- Ensure diagnostics are enabled for this buffer
+        vim.diagnostic.enable(bufnr)
+        
+        -- In Neovim 0.11+, diagnostics should work automatically via vim.diagnostic
+        -- The LSP client will automatically publish diagnostics to vim.diagnostic
+
+        -- Inlay hints if supported
+        if vim.lsp.inlay_hint and vim.lsp.inlay_hint.enable ~= nil then
+          local clients = vim.lsp.get_clients({ bufnr = bufnr })
+          for _, c in ipairs(clients) do
+            if c.server_capabilities and c.server_capabilities.inlayHintProvider then
+              vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
+              break
+            end
+          end
+        end
+      end
+
+      -- Diagnostics configuration
+      vim.diagnostic.config({
+        underline = true,
+        virtual_text = { 
+          enabled = true,
+          spacing = 2, 
+          prefix = "●",
+          severity = {
+            min = vim.diagnostic.severity.HINT,
+          },
+        },
+        signs = true,
+        update_in_insert = false,
+        severity_sort = true,
+        float = {
+          border = "rounded",
+          source = "always",
+        },
+      })
       
-      -- Rust
-      lspconfig.rust_analyzer.setup({
+      -- Ensure diagnostics are enabled globally
+      vim.diagnostic.enable()
+      
+      -- Set up diagnostic signs
+      local signs = {
+        { name = "DiagnosticSignError", text = "E", texthl = "DiagnosticSignError" },
+        { name = "DiagnosticSignWarn", text = "W", texthl = "DiagnosticSignWarn" },
+        { name = "DiagnosticSignInfo", text = "I", texthl = "DiagnosticSignInfo" },
+        { name = "DiagnosticSignHint", text = "H", texthl = "DiagnosticSignHint" },
+      }
+      
+      for _, sign in ipairs(signs) do
+        vim.fn.sign_define(sign.name, { texthl = sign.name, text = sign.text, numhl = "" })
+      end
+
+      -- Server configurations using new API
+      vim.lsp.config.rust_analyzer = {
+        capabilities = capabilities,
+        on_attach = on_attach,
+        filetypes = { "rust" },
+        root_dir = function(bufnr)
+          local fname = vim.api.nvim_buf_get_name(bufnr)
+          if fname == "" then return nil end
+          local found = vim.fs.find({ "Cargo.toml", ".git" }, { path = fname, upward = true })
+          if #found > 0 then
+            return vim.fs.dirname(found[1])
+          end
+          -- Fallback: use the file's directory as root
+          return vim.fs.dirname(fname)
+        end,
         settings = {
           ["rust-analyzer"] = {
             cargo = { allFeatures = true },
             procMacro = { enable = true },
-            checkOnSave = { allFeatures = true },
+            checkOnSave = { 
+              command = "clippy",
+              allFeatures = true,
+            },
             completion = { enable = true },
-          }
-        }
-      })
+            diagnostics = {
+              enable = true,
+            },
+            inlayHints = {
+              enable = true,
+            },
+          },
+        },
+      }
 
-      -- Python
-      lspconfig.pyright.setup({
-        cmd = { "pyright-langserver", "--stdio" },
+      vim.lsp.config.pyright = {
+        capabilities = capabilities,
+        on_attach = on_attach,
         filetypes = { "python" },
-        root_dir = lspconfig.util.root_pattern("pyproject.toml", "setup.py", "requirements.txt", ".git"),
+        root_dir = function(bufnr)
+          local fname = vim.api.nvim_buf_get_name(bufnr)
+          if fname == "" then return nil end
+          local found = vim.fs.find({ "pyproject.toml", "setup.py", "requirements.txt", ".git" }, { path = fname, upward = true })
+          if #found > 0 then
+            return vim.fs.dirname(found[1])
+          end
+          -- Fallback: use the file's directory as root
+          return vim.fs.dirname(fname)
+        end,
+        settings = {
+          python = {
+            analysis = { typeCheckingMode = "basic", autoImportCompletions = true },
+          },
+        },
+      }
+
+      vim.lsp.config.tsserver = {
+        capabilities = capabilities,
+        on_attach = on_attach,
+        filetypes = { "javascript", "typescript", "javascriptreact", "typescriptreact" },
+        root_dir = function(bufnr)
+          local fname = vim.api.nvim_buf_get_name(bufnr)
+          if fname == "" then return nil end
+          local found = vim.fs.find({ "package.json", "tsconfig.json", "jsconfig.json", ".git" }, { path = fname, upward = true })
+          if #found > 0 then
+            return vim.fs.dirname(found[1])
+          end
+          -- Fallback: use the file's directory as root
+          return vim.fs.dirname(fname)
+        end,
+      }
+
+      vim.lsp.config.gopls = {
+        capabilities = capabilities,
+        on_attach = on_attach,
+        filetypes = { "go", "gomod", "gowork", "gotmpl" },
+        root_dir = function(bufnr)
+          local fname = vim.api.nvim_buf_get_name(bufnr)
+          if fname == "" then return nil end
+          local found = vim.fs.find({ "go.work", "go.mod", ".git" }, { path = fname, upward = true })
+          if #found > 0 then
+            return vim.fs.dirname(found[1])
+          end
+          -- Fallback: use the file's directory as root
+          return vim.fs.dirname(fname)
+        end,
+        settings = {
+          gopls = {
+            analyses = { unusedparams = true },
+            staticcheck = true,
+          },
+        },
+      }
+
+      -- Mapping between vim.lsp.config names and mason-lspconfig server names
+      local server_name_map = {
+        tsserver = "ts_ls",
+      }
+
+      -- Auto-start LSP clients for relevant buffers
+      local function maybe_start_lsp(bufnr)
+        -- Skip special buffers
+        if vim.bo[bufnr].buftype ~= "" then return end
+
+        local ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+        if ft == "" then
+          -- Filetype not set yet, skip
+          return
+        end
+        
+        for name, cfg in pairs(vim.lsp.config) do
+          -- Skip meta-keys (keys starting with underscore)
+          if name:match("^_") then
+            -- Skip this iteration
+          elseif type(cfg) ~= "table" then
+            -- Skip invalid configs
+          else
+            local fts = cfg.filetypes
+            if fts == nil or (ft ~= "" and vim.tbl_contains(fts, ft)) then
+              local clients = vim.lsp.get_clients({ bufnr = bufnr, name = name })
+              if #clients == 0 then
+              -- Build start config from cfg, excluding any internal/meta keys
+              -- Always set cmd explicitly - don't copy from cfg
+              local start_cfg = {
+                capabilities = cfg.capabilities,
+                on_attach = cfg.on_attach,
+                filetypes = cfg.filetypes,
+                root_dir = cfg.root_dir,
+                settings = cfg.settings,
+              }
+              
+              -- Always determine cmd explicitly - don't trust cfg.cmd
+              do
+                -- Map the server name to mason-lspconfig name if needed
+                local mason_name = server_name_map[name] or name
+                local cmd_found = false
+                
+                -- Determine the actual executable name to search for
+                local exe_name
+                if mason_name == "rust_analyzer" then
+                  exe_name = "rust-analyzer"
+                elseif mason_name == "ts_ls" then
+                  exe_name = "typescript-language-server"
+                elseif mason_name == "pyright" then
+                  exe_name = "pyright-langserver"
+                elseif mason_name == "gopls" then
+                  exe_name = "gopls"
+                else
+                  exe_name = mason_name
+                end
+                
+                -- Try to get executable from mason-registry first
+                local ok_registry, registry = pcall(require, "mason-registry")
+                if ok_registry and registry then
+                  local ok_pkg, pkg = pcall(function() return registry.get_package(mason_name) end)
+                  if ok_pkg and pkg and pkg:is_installed() then
+                    -- Try mason's bin directory directly
+                    local mason_bin = vim.fn.stdpath("data") .. "/mason/bin/" .. exe_name
+                    if vim.fn.executable(mason_bin) == 1 then
+                      local cmd = { mason_bin }
+                      -- Add common args for stdio servers
+                      if mason_name == "pyright" then
+                        table.insert(cmd, "--stdio")
+                      elseif mason_name == "ts_ls" then
+                        table.insert(cmd, "--stdio")
+                      end
+                      -- Validate cmd before setting
+                      if cmd[1] and type(cmd[1]) == "string" and not cmd[1]:match("^_") then
+                        start_cfg.cmd = cmd
+                        cmd_found = true
+                      end
+                    else
+                      -- Try using get_install_path
+                      local install_path = pkg:get_install_path()
+                      if install_path then
+                        local bin_dir = install_path .. "/bin"
+                        local mason_exe = bin_dir .. "/" .. exe_name
+                        if vim.fn.executable(mason_exe) == 1 then
+                          local cmd = { mason_exe }
+                          -- Add common args for stdio servers
+                          if mason_name == "pyright" then
+                            table.insert(cmd, "--stdio")
+                          elseif mason_name == "ts_ls" then
+                            table.insert(cmd, "--stdio")
+                          end
+                          -- Validate cmd before setting
+                          if cmd[1] and type(cmd[1]) == "string" and not cmd[1]:match("^_") then
+                            start_cfg.cmd = cmd
+                            cmd_found = true
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+                
+                -- Fallback: try to find executable in PATH
+                if not cmd_found then
+                  local exe = vim.fn.exepath(exe_name)
+                  if exe and exe ~= "" then
+                    local cmd = { exe }
+                    -- Add common args for stdio servers
+                    if mason_name == "pyright" then
+                      table.insert(cmd, "--stdio")
+                    elseif mason_name == "ts_ls" then
+                      table.insert(cmd, "--stdio")
+                    end
+                    -- Validate cmd before setting
+                    if cmd[1] and type(cmd[1]) == "string" and not cmd[1]:match("^_") then
+                      start_cfg.cmd = cmd
+                      cmd_found = true
+                    end
+                  end
+                end
+                
+                -- Last resort: use executable name (will try to find in PATH at runtime)
+                if not cmd_found then
+                  local cmd = { exe_name }
+                  -- Add common args for stdio servers
+                  if mason_name == "pyright" then
+                    table.insert(cmd, "--stdio")
+                  elseif mason_name == "ts_ls" then
+                    table.insert(cmd, "--stdio")
+                  end
+                  -- Validate cmd before setting
+                  if cmd[1] and type(cmd[1]) == "string" and not cmd[1]:match("^_") then
+                    start_cfg.cmd = cmd
+                  end
+                end
+              end
+              
+              -- Final validation: ensure cmd is always a valid table
+              if not start_cfg.cmd or type(start_cfg.cmd) ~= "table" or #start_cfg.cmd == 0 or not start_cfg.cmd[1] or type(start_cfg.cmd[1]) ~= "string" or start_cfg.cmd[1]:match("^_") then
+                -- Force a valid cmd - use executable name that should be in PATH
+                local exe_name
+                if name == "rust_analyzer" then
+                  exe_name = "rust-analyzer"
+                elseif name == "tsserver" then
+                  exe_name = "typescript-language-server"
+                elseif name == "pyright" then
+                  exe_name = "pyright-langserver"
+                elseif name == "gopls" then
+                  exe_name = "gopls"
+                else
+                  exe_name = name
+                end
+                
+                start_cfg.cmd = { exe_name }
+                -- Add stdio flags if needed
+                if name == "pyright" or name == "tsserver" then
+                  table.insert(start_cfg.cmd, "--stdio")
+                end
+              end
+              
+              -- Double-check cmd is valid before starting
+              if not start_cfg.cmd or type(start_cfg.cmd) ~= "table" or #start_cfg.cmd == 0 or type(start_cfg.cmd[1]) ~= "string" then
+                vim.notify("LSP cmd validation failed for " .. name .. ": cmd=" .. vim.inspect(start_cfg.cmd), vim.log.levels.ERROR)
+                -- Force cmd to be valid
+                local exe_name = name == "rust_analyzer" and "rust-analyzer" or name
+                start_cfg.cmd = { exe_name }
+              end
+              
+              -- Build final config explicitly - validate cmd one more time
+              local final_cmd = start_cfg.cmd
+              if not final_cmd or type(final_cmd) ~= "table" or #final_cmd == 0 or not final_cmd[1] or type(final_cmd[1]) ~= "string" or final_cmd[1]:match("^_") then
+                -- Last resort: use executable name
+                local exe_name = name == "rust_analyzer" and "rust-analyzer" or 
+                                (name == "tsserver" and "typescript-language-server" or
+                                (name == "pyright" and "pyright-langserver" or name))
+                final_cmd = { exe_name }
+                if name == "pyright" or name == "tsserver" then
+                  table.insert(final_cmd, "--stdio")
+                end
+              end
+              
+              local final_cfg = {
+                name = name,
+                cmd = final_cmd,
+                capabilities = start_cfg.capabilities,
+                on_attach = start_cfg.on_attach,
+                filetypes = start_cfg.filetypes,
+                root_dir = start_cfg.root_dir,
+                settings = start_cfg.settings,
+              }
+              
+              -- Start the client
+              local ok, client_id = pcall(function()
+                -- Start the client and attach it to the buffer
+                return vim.lsp.start(final_cfg, { bufnr = bufnr })
+              end)
+              
+              if not ok then
+                vim.notify("Failed to start LSP client " .. name .. ": " .. tostring(client_id), vim.log.levels.ERROR)
+              elseif client_id then
+                -- Client started successfully
+                -- In Neovim 0.11, the client should automatically attach to the buffer
+                -- But let's verify it's attached
+                vim.schedule(function()
+                  local clients = vim.lsp.get_clients({ bufnr = bufnr, name = name })
+                  if #clients == 0 then
+                    vim.notify("LSP client " .. name .. " started but not attached to buffer", vim.log.levels.WARN)
+                  end
+                end)
+              end
+              end
+            end
+          end
+        end
+      end
+
+      vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile", "FileType" }, {
+        callback = function(args)
+          maybe_start_lsp(args.buf)
+        end,
       })
-
-      -- TypeScript/JavaScript
-      lspconfig.ts_ls.setup({})
-
-      -- Go
-      lspconfig.gopls.setup({})
-
-      -- Global mappings
-      vim.keymap.set("n", "gd", vim.lsp.buf.definition, { desc = "Go to definition" })
-      vim.keymap.set("n", "gr", vim.lsp.buf.references, { desc = "Go to references" })
-      vim.keymap.set("n", "<leader>as", ":copen<CR>", { desc = "Open quickfix" })
-      vim.keymap.set("n", "<leader>aa", ":cclose<CR>", { desc = "Close quickfix" })
+      
+      -- Add a command to check diagnostics
+      vim.api.nvim_create_user_command("CheckDiagnostics", function()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local diagnostics = vim.diagnostic.get(bufnr)
+        if #diagnostics == 0 then
+          vim.notify("No diagnostics found for this buffer", vim.log.levels.INFO)
+        else
+          vim.notify("Found " .. #diagnostics .. " diagnostics", vim.log.levels.INFO)
+          for _, diag in ipairs(diagnostics) do
+            print(string.format("[%s] %s (line %d)", diag.severity, diag.message, diag.lnum + 1))
+          end
+        end
+        
+        -- Also check LSP clients
+        local clients = vim.lsp.get_clients({ bufnr = bufnr })
+        if #clients == 0 then
+          vim.notify("No LSP clients attached to this buffer", vim.log.levels.WARN)
+        else
+          print("\nLSP clients attached:")
+          for _, client in ipairs(clients) do
+            print("  - " .. client.name)
+            if client.server_capabilities then
+              print("    Diagnostic provider: " .. tostring(client.server_capabilities.diagnosticProvider ~= nil))
+            end
+          end
+        end
+        
+        -- Debug: Check filetype and config
+        local ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+        print("\nFiletype: " .. (ft ~= "" and ft or "<empty>"))
+        print("Buffer type: " .. (vim.bo[bufnr].buftype ~= "" and vim.bo[bufnr].buftype or "<empty>"))
+        
+        -- Check if config exists
+        if vim.lsp.config and vim.lsp.config.rust_analyzer then
+          print("rust_analyzer config exists in vim.lsp.config")
+        else
+          print("rust_analyzer config NOT found in vim.lsp.config")
+        end
+        
+        -- Try to manually start LSP
+        print("\nTry running :StartLSP to manually start LSP for this buffer")
+      end, {})
+      
+      -- Add a command to manually start LSP
+      vim.api.nvim_create_user_command("StartLSP", function()
+        local bufnr = vim.api.nvim_get_current_buf()
+        maybe_start_lsp(bufnr)
+        
+        -- Check if it worked
+        vim.schedule(function()
+          local clients = vim.lsp.get_clients({ bufnr = bufnr })
+          if #clients > 0 then
+            vim.notify("LSP clients attached: " .. #clients, vim.log.levels.INFO)
+            for _, client in ipairs(clients) do
+              print("  - " .. client.name)
+            end
+          else
+            vim.notify("No LSP clients attached after manual start", vim.log.levels.WARN)
+          end
+        end)
+      end, {})
 
       -- CMP setup
       local cmp = require("cmp")
@@ -580,10 +994,6 @@ return {
           { name = "path" },
         }),
       })
-
-      -- Set up capabilities
-      local capabilities = require("cmp_nvim_lsp").default_capabilities()
-      -- Capabilities are now handled by vim.lsp.config automatically
     end,
   },
 
@@ -662,17 +1072,9 @@ return {
   },
 
   -- Vimwiki
+  -- Note: vim.g.vimwiki_list is configured in init.lua using VIM_WIKI_PATHS env var
   {
     "vimwiki/vimwiki",
-    config = function()
-      vim.g.vimwiki_list = {
-        {
-          syntax = "markdown",
-          ext = ".md",
-          path = "~/vimwiki/",
-        }
-      }
-    end,
   },
 
   -- Distraction free writing (replaces goyo.vim)
